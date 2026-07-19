@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Salto Extremo</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    background: #1e1b4b;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    touch-action: manipulation;
+  }
+  #gameContainer {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(180deg, #312e81 0%, #1e1b4b 100%);
+  }
+  canvas { display: block; }
+  #hud {
+    position: absolute;
+    top: env(safe-area-inset-top, 12px);
+    left: 15px;
+    color: #fef08a;
+    font-size: 22px;
+    font-weight: bold;
+    text-shadow: 1px 1px 3px black;
+    z-index: 5;
+  }
+  #best {
+    position: absolute;
+    top: env(safe-area-inset-top, 12px);
+    right: 15px;
+    color: #ddd6fe;
+    font-size: 15px;
+    font-weight: bold;
+    text-shadow: 1px 1px 3px black;
+    z-index: 5;
+  }
+  #muteBtn {
+    position: absolute;
+    bottom: env(safe-area-inset-bottom, 15px);
+    right: 15px;
+    background: rgba(0,0,0,0.35);
+    border: 1px solid #fbbf24;
+    color: #fbbf24;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    font-size: 18px;
+    z-index: 5;
+  }
+  #overlay {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(10,8,30,0.88);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    text-align: center;
+    z-index: 10;
+    padding: 0 20px;
+  }
+  #overlay h1 {
+    font-size: 40px;
+    color: #fbbf24;
+    text-shadow: 0 0 14px rgba(250,204,21,0.6);
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }
+  #overlay h2 { font-size: 26px; color: #fbbf24; margin-bottom: 8px; }
+  #overlay p { margin-bottom: 22px; font-size: 15px; opacity: 0.85; max-width: 300px; }
+  .playBtn {
+    background: linear-gradient(180deg, #fde047, #fbbf24);
+    color: #1e1b4b;
+    border: none;
+    padding: 15px 46px;
+    font-size: 20px;
+    font-weight: 800;
+    border-radius: 30px;
+    cursor: pointer;
+    box-shadow: 0 4px 0 #b45309, 0 6px 12px rgba(0,0,0,0.4);
+  }
+  .playBtn:active { transform: translateY(3px); box-shadow: 0 1px 0 #b45309; }
+  #adBanner {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 50px;
+    background: #111;
+    color: #888;
+    font-size: 11px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 4;
+    border-top: 1px solid #333;
+  }
+</style>
+</head>
+<body>
+  <div id="gameContainer">
+    <canvas id="game"></canvas>
+    <div id="hud">0</div>
+    <div id="best">Mejor: 0</div>
+    <button id="muteBtn">🔊</button>
+    <div id="overlay">
+      <h1>⚡ SALTO EXTREMO</h1>
+      <p>Toca la pantalla para saltar y esquivar obstáculos. ¡Doble salto disponible!</p>
+      <button class="playBtn" id="startBtn">JUGAR</button>
+    </div>
+    <div id="adBanner">[ Espacio para banner publicitario ]</div>
+  </div>
+
+<script>
+// ============ AUDIO (sintetizado, sin archivos externos) ============
+let audioCtx = null;
+let muted = false;
+function ensureAudio() { if (!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)(); }
+function beep(freq, dur, type='sine', vol=0.15) {
+  if (muted || !audioCtx) return;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.value = vol;
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start();
+  g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  o.stop(audioCtx.currentTime + dur);
+}
+const sndJump = () => beep(520, 0.12, 'square', 0.12);
+const sndScore = () => beep(880, 0.08, 'sine', 0.1);
+const sndHit = () => beep(120, 0.35, 'sawtooth', 0.18);
+
+document.getElementById('muteBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  muted = !muted;
+  document.getElementById('muteBtn').textContent = muted ? '🔇' : '🔊';
+});
+
+// ============ CANVAS SETUP ============
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const hud = document.getElementById('hud');
+const bestEl = document.getElementById('best');
+const overlay = document.getElementById('overlay');
+
+let W, H, GROUND_Y;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  GROUND_Y = H - 90;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ============ HIGH SCORE (persistente en el dispositivo) ============
+let bestScore = 0;
+try { bestScore = parseInt(localStorage.getItem('salto_extremo_best') || '0', 10); } catch(e) {}
+bestEl.textContent = 'Mejor: ' + bestScore;
+
+let player, obstacles, score, speed, gameRunning, spawnTimer, particles;
+
+function resetGame() {
+  player = { x: 60, y: GROUND_Y - 44, w: 38, h: 44, vy: 0, jumps: 0, maxJumps: 2 };
+  obstacles = [];
+  particles = [];
+  score = 0;
+  speed = W * 0.007;
+  spawnTimer = 0;
+  gameRunning = true;
+  hud.textContent = '0';
+}
+
+function jump() {
+  ensureAudio();
+  if (!gameRunning) return;
+  if (player.jumps < player.maxJumps) {
+    player.vy = -H * 0.021;
+    player.jumps++;
+    sndJump();
+    for (let i = 0; i < 8; i++) {
+      particles.push({x: player.x+player.w/2, y: player.y+player.h, vx: (Math.random()-0.5)*4, vy: Math.random()*-1.5, life: 22, color: '#fbbf24'});
+    }
+  }
+}
+
+document.addEventListener('keydown', (e) => { if (e.code === 'Space') { e.preventDefault(); jump(); } });
+canvas.addEventListener('touchstart', (e) => { e.preventDefault(); jump(); }, {passive:false});
+canvas.addEventListener('mousedown', jump);
+
+function spawnObstacle() {
+  const type = Math.random() < 0.7 ? 'ground' : 'air';
+  if (type === 'ground') {
+    const h = H * (0.07 + Math.random()*0.07);
+    obstacles.push({ x: W, y: GROUND_Y - h, w: W*0.05, h: h, type: 'ground' });
+  } else {
+    obstacles.push({ x: W, y: GROUND_Y - H*0.24, w: W*0.06, h: H*0.045, type: 'air' });
+  }
+}
+
+function rectsCollide(a, b) {
+  const pad = a.w * 0.15;
+  return a.x+pad < b.x + b.w && a.x + a.w-pad > b.x && a.y+pad < b.y + b.h && a.y + a.h > b.y;
+}
+
+function update() {
+  if (!gameRunning) return;
+  player.vy += H * 0.0011;
+  player.y += player.vy;
+  if (player.y >= GROUND_Y - player.h) {
+    player.y = GROUND_Y - player.h;
+    player.vy = 0;
+    player.jumps = 0;
+  }
+
+  spawnTimer++;
+  const spawnRate = Math.max(40, 85 - Math.floor(speed*3));
+  if (spawnTimer > spawnRate) { spawnObstacle(); spawnTimer = 0; }
+
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    obstacles[i].x -= speed;
+    if (obstacles[i].x + obstacles[i].w < 0) {
+      obstacles.splice(i, 1);
+      score++;
+      hud.textContent = score;
+      sndScore();
+      speed += W * 0.00009;
+    } else if (rectsCollide(player, obstacles[i])) {
+      gameOver();
+    }
+  }
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy; p.life--;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function drawBackground() {
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  for (let i = 0; i < 5; i++) {
+    const sx = (i * (W*0.3) - (score*2) % (W*1.2) + W*1.2) % (W*1.2) - 100;
+    ctx.beginPath();
+    ctx.ellipse(sx, H*0.15 + i*20, 30, 12, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.fillStyle = '#4c1d95';
+  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+  ctx.fillStyle = '#fbbf24';
+  ctx.fillRect(0, GROUND_Y, W, 4);
+}
+
+function drawPlayer() {
+  ctx.save();
+  ctx.translate(player.x, player.y);
+  ctx.fillStyle = '#f87171';
+  ctx.beginPath();
+  ctx.roundRect(0, 0, player.w, player.h, 8);
+  ctx.fill();
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.arc(player.w*0.65, player.h*0.3, 5, 0, Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle = '#1e1b4b';
+  ctx.beginPath();
+  ctx.arc(player.w*0.68, player.h*0.3, 2.4, 0, Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawObstacles() {
+  obstacles.forEach(o => {
+    ctx.fillStyle = o.type === 'ground' ? '#22d3ee' : '#f472b6';
+    ctx.beginPath();
+    ctx.roundRect(o.x, o.y, o.w, o.h, 4);
+    ctx.fill();
+  });
+}
+
+function drawParticles() {
+  particles.forEach(p => {
+    ctx.globalAlpha = Math.max(p.life/22, 0);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x, p.y, 4, 4);
+    ctx.globalAlpha = 1;
+  });
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawBackground();
+  drawObstacles();
+  drawParticles();
+  drawPlayer();
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function gameOver() {
+  gameRunning = false;
+  sndHit();
+  if (score > bestScore) {
+    bestScore = score;
+    try { localStorage.setItem('salto_extremo_best', bestScore); } catch(e) {}
+  }
+  bestEl.textContent = 'Mejor: ' + bestScore;
+  overlay.style.display = 'flex';
+  overlay.innerHTML = `
+    <h2>💥 ¡Chocaste!</h2>
+    <p>Puntuación: ${score}<br>Mejor puntuación: ${bestScore}</p>
+    <button class="playBtn" id="startBtn">JUGAR DE NUEVO</button>
+  `;
+  document.getElementById('startBtn').addEventListener('click', startGame);
+
+  // GANCHO PARA ANUNCIO INTERSTICIAL (ver README para integrar AdMob)
+  // window.showInterstitialAd && window.showInterstitialAd();
+}
+
+function startGame() {
+  ensureAudio();
+  overlay.style.display = 'none';
+  resetGame();
+}
+
+document.getElementById('startBtn').addEventListener('click', startGame);
+
+resetGame();
+gameRunning = false;
+draw();
+loop();
+</script>
+</body>
+</html>
